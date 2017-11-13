@@ -9,15 +9,16 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.LongAccumulator;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class Exercise11 {
 
     private static BlockingQueue<File> queue = new ArrayBlockingQueue<>(10);
-    private static BlockingQueue<Map<String, LongAdder>> queue2 = new ArrayBlockingQueue<>(10);
+    private static BlockingQueue<Map<String, LongAccumulator>> queue2 = new ArrayBlockingQueue<>(10);
     private static final String DUMMY_FILE_NAME = "DUMMY_FILE_NAME";
     private static final File DUMMY_FILE = new File(DUMMY_FILE_NAME);
-    private static final Map<String, LongAdder> DUMMY_MAP = new HashMap<>();
+    private static final Map<String, LongAccumulator> DUMMY_MAP = new HashMap<>();
 
     static {
         DUMMY_MAP.put(DUMMY_FILE_NAME, null);
@@ -25,7 +26,7 @@ public class Exercise11 {
 
     private final static ForkJoinPool consumerPool = new ForkJoinPool(3);
 
-    static class Producer implements Runnable {
+    private static class Producer implements Runnable {
         private final String rootPath;
 
         public Producer(String rootPath) {
@@ -41,13 +42,11 @@ public class Exercise11 {
                         .forEach(file -> {
                             try {
                                 queue.put(file);
-                                System.out.println("Producer put file: " + file.getName());
                             } catch (InterruptedException e) {
                                 Thread.currentThread().interrupt();
                             }
                         });
                 queue.put(DUMMY_FILE);
-                System.out.println("Producer put file: " + DUMMY_FILE.getName());
             } catch (IOException e) {
                 e.printStackTrace();
             } catch (InterruptedException e) {
@@ -56,14 +55,14 @@ public class Exercise11 {
         }
     }
 
-    static class Consumer implements Callable<String> {
+    private static class Consumer implements Callable<String> {
 
         private WordsFinder wordsFinder = new WordsFinder();
-        private Map<String, LongAdder> localMap = new ConcurrentHashMap<>();
+        private Map<String, LongAccumulator> localMap;
 
         class WordsFinder {
             void findWords(File source) {
-
+                localMap = new HashMap<>();
                 try (BufferedReader br = new BufferedReader(new FileReader(source))) {
 
                     String currentLine;
@@ -72,16 +71,16 @@ public class Exercise11 {
                         Arrays.stream(currentLine.split(" "))
                                 .map(String::trim)
                                 .forEach(word -> {
-                                    localMap.putIfAbsent(word, new LongAdder());
-                                    localMap.computeIfPresent(word, (key, value) -> {
-                                        value.increment();
-                                        return value;
-                                    });
+                                    if (null != localMap.putIfAbsent(word, new LongAccumulator((left, right) -> left + right, 1))) {
+                                        localMap.compute(word, (key, value) -> {
+                                            value.accumulate(1);
+                                            return value;
+                                        });
+                                    }
                                 });
                     }
                     try {
                         queue2.put(Collections.unmodifiableMap(localMap));
-                        System.out.println("Consumer put localMap: ");
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     }
@@ -98,14 +97,12 @@ public class Exercise11 {
                 File file = null;
                 try {
                     file = queue.take();
-                    System.out.println("Consumer take file: " + file.getName());
                     if (file.equals(DUMMY_FILE)) {
                         if (consumerPool.getRunningThreadCount() <= 1) {
                             queue2.put(DUMMY_MAP);
                         }
                         queue.put(DUMMY_FILE);
                         Thread.currentThread().interrupt();
-                        System.out.println("Consumer put DUMMY_MAP: ");
                         break;
                     }
                 } catch (InterruptedException e) {
@@ -117,23 +114,20 @@ public class Exercise11 {
         }
     }
 
-    static class FinalConsumer implements Runnable {
+    private static class FinalConsumer implements Runnable {
 
-        private Map<String, Long> wordsToCounterResult = new ConcurrentHashMap<>();
+        private Map<String, Long> wordsToCounterResult = new HashMap<>();
 
         @Override
         public void run() {
             while (true) {
                 try {
-                    Map<String, LongAdder> wordsToCounter = queue2.take();
-                    //System.out.println("FinalConsumer took localMap: " + wordsToCounter.keySet());
+                    Map<String, LongAccumulator> wordsToCounter = queue2.take();
                     if (wordsToCounter.keySet().contains(DUMMY_FILE_NAME)) {
                         break;
                     }
                     wordsToCounter.forEach((key, value) -> {
-//                                wordsToCounterResult.putIfAbsent(key, 0L);
-//                                wordsToCounterResult.computeIfPresent(key, (k, v) -> value.sum() + v);
-                                wordsToCounterResult.merge(key, value.sum(), (value1, value2) -> value1 + value2);
+                                wordsToCounterResult.merge(key, value.get(), (value1, value2) -> value1 + value2);
                     }
                     );
 
